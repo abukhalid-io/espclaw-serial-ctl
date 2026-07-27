@@ -5,12 +5,13 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "espclaw-serial-ctl"
 version = "0.1.0"
-description = "Kontrol ESP-Claw (ESP32-S3) via USB serial console dari komputer manapun"
+description = "Control ESP-Claw (ESP32-S3) over its USB serial console from any computer"
 readme = "README.md"
 requires-python = ">=3.8"
 license = { text = "MIT" }
 dependencies = [
     "pyserial>=3.5",
+    "Pillow>=10.0",
 ]
 
 [project.scripts]
@@ -21,3 +22,6 @@ espclawctl-gui = "espclaw_ctl.gui:main"
 
 [tool.setuptools]
 packages = ["espclaw_ctl", "espclaw_ctl.gui"]
+
+[tool.setuptools.package-data]
+"espclaw_ctl.gui" = ["assets/*.png"]

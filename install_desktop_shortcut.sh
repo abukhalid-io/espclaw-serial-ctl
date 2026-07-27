@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Membuat shortcut desktop (Linux) untuk ESP-Claw Serial Control GUI.
+# Creates a desktop shortcut (Linux) for the ESP-Claw Serial Control GUI.
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -15,7 +15,7 @@ cat > "$APPS_DIR/$DESKTOP_FILE_NAME" <<EOF
 [Desktop Entry]
 Type=Application
 Name=$APP_NAME
-Comment=Kontrol ESP-Claw (ESP32-S3) via USB serial
+Comment=Control ESP-Claw (ESP32-S3) over USB serial
 Exec=$PYTHON_BIN -m espclaw_ctl.gui
 Path=$REPO_DIR
 Terminal=false
@@ -29,8 +29,8 @@ if [ -d "$DESKTOP_DIR" ]; then
     if command -v gio >/dev/null 2>&1; then
         gio set "$DESKTOP_DIR/$DESKTOP_FILE_NAME" metadata::trusted true 2>/dev/null || true
     fi
-    echo "Shortcut dibuat di: $DESKTOP_DIR/$DESKTOP_FILE_NAME"
+    echo "Shortcut created at: $DESKTOP_DIR/$DESKTOP_FILE_NAME"
 fi
 
-echo "Shortcut juga terdaftar di app launcher: $APPS_DIR/$DESKTOP_FILE_NAME"
-echo "Pastikan dependency sudah terpasang: pip install -r requirements.txt (atau pip install -e .)"
+echo "Shortcut also registered in the app launcher: $APPS_DIR/$DESKTOP_FILE_NAME"
+echo "Make sure dependencies are installed: pip install -r requirements.txt (or pip install -e .)"

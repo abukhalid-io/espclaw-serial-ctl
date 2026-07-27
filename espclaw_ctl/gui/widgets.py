@@ -1,7 +1,13 @@
 import math
+import os
 import tkinter as tk
 
+from PIL import Image, ImageTk
+
 from espclaw_ctl.gui.theme import Theme
+
+_ASSETS_DIR = os.path.join(os.path.dirname(__file__), "assets")
+_LOGO_PATH = os.path.join(_ASSETS_DIR, "logo.png")
 
 
 class PillButton(tk.Canvas):
@@ -102,66 +108,28 @@ class Spinner(tk.Canvas):
 
 
 class LobsterLogo(tk.Canvas):
-    def __init__(self, master, size=48, color=Theme.LOBSTER, dark=Theme.LOBSTER_DARK, **kw):
+    _source_image = None
+
+    def __init__(self, master, size=48, **kw):
         try:
             kw.setdefault("bg", master.cget("bg"))
         except tk.TclError:
             kw.setdefault("bg", Theme.BG)
         super().__init__(master, width=size, height=size, highlightthickness=0, **kw)
         self._size = size
-        self._color = color
-        self._dark = dark
-        self._draw()
+        self._photo = self._load_photo(size)
+        self.create_image(size / 2, size / 2, image=self._photo)
 
-    def _draw(self):
-        self.delete("all")
-        s = self._size / 64.0
-        c, d = self._color, self._dark
-
-        def pt(*coords):
-            out = []
-            for i, v in enumerate(coords):
-                out.append(v * s)
-            return out
-
-        # arms connecting claws to the body (drawn under the claw mitts and head)
-        self.create_line(*pt(24, 30, 9, 10), fill=c, width=max(1, 5 * s), capstyle="round")
-        self.create_line(*pt(24, 34, 9, 54), fill=c, width=max(1, 5 * s), capstyle="round")
-
-        # upper claw (mitt + split line)
-        self.create_oval(*pt(0, 2, 20, 18), fill=c, outline="")
-        self.create_line(*pt(11, 4, 11, 16), fill=d, width=max(1, 1.2 * s))
-
-        # lower claw (mitt + split line)
-        self.create_oval(*pt(0, 46, 20, 62), fill=c, outline="")
-        self.create_line(*pt(11, 48, 11, 60), fill=d, width=max(1, 1.2 * s))
-
-        # tail fan (drawn first so body overlaps it)
-        self.create_polygon(*pt(52, 24, 62, 14, 58, 32, 62, 50, 52, 40), fill=c, outline="")
-        for x in (52, 56, 60):
-            self.create_line(*pt(x, 22, x - 3, 42), fill=d, width=max(1, 1.3 * s))
-
-        # ribbed tail segments
-        for cx in (44, 50):
-            self.create_oval(*pt(cx - 7, 21, cx + 7, 43), fill=c, outline="")
-        self.create_line(*pt(41, 22, 41, 42), fill=d, width=max(1, 1.3 * s))
-        self.create_line(*pt(47, 21, 47, 43), fill=d, width=max(1, 1.3 * s))
-
-        # body
-        self.create_oval(*pt(24, 19, 46, 45), fill=c, outline="")
-
-        # head
-        self.create_oval(*pt(14, 22, 32, 42), fill=c, outline="")
-
-        # eyes
-        self.create_oval(*pt(15, 20, 23, 28), fill="#FFFFFF", outline="")
-        self.create_oval(*pt(17.5, 22.5, 21, 26), fill="#1B1B22", outline="")
-        self.create_oval(*pt(23, 20, 31, 28), fill="#FFFFFF", outline="")
-        self.create_oval(*pt(25.5, 22.5, 29, 26), fill="#1B1B22", outline="")
-
-        # antennae (drawn last so they stay visible above everything)
-        self.create_line(*pt(20, 21, 12, 10, 16, 0), smooth=True, fill=c, width=max(1, 2 * s))
-        self.create_line(*pt(26, 21, 28, 8, 24, 0), smooth=True, fill=c, width=max(1, 2 * s))
+    @classmethod
+    def _load_photo(cls, size):
+        if cls._source_image is None:
+            cls._source_image = Image.open(_LOGO_PATH).convert("RGBA")
+        src = cls._source_image
+        w, h = src.size
+        scale = size / max(w, h)
+        new_size = (max(1, round(w * scale)), max(1, round(h * scale)))
+        resized = src.resize(new_size, Image.LANCZOS)
+        return ImageTk.PhotoImage(resized)
 
 
 class StatusDot(tk.Canvas):

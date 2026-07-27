@@ -6,10 +6,20 @@ from tkinter import ttk
 
 import serial
 
-from espclaw_ctl.cli import DEFAULT_BAUD, find_candidate_ports, reset_device
+from espclaw_ctl import config_store
+from espclaw_ctl.cli import (
+    DEFAULT_BAUD,
+    find_candidate_ports,
+    looks_like_esp_port,
+    quote_console_arg,
+    reset_device,
+)
 from espclaw_ctl.gui.theme import Theme
 from espclaw_ctl.gui.widgets import Card, LobsterLogo, PillButton, Spinner, StatusDot
 from espclaw_ctl.gui.wifi_parse import parse_wifi_scan, parse_wifi_status, signal_bars
+
+MAX_RECONNECT_ATTEMPTS = 5
+RECONNECT_INTERVAL_MS = 1500
 
 
 class App:
@@ -28,7 +38,11 @@ class App:
 
         self._scanning = False
         self._auto_connected = False
-        self._port_devices = []
+
+        self._last_port = None
+        self._disconnect_requested = False
+        self._reconnect_attempts = 0
+        self._pw_visible = False
 
         self.wifi_status_buffer = ""
         self.wifi_scan_buffer = ""
@@ -70,44 +84,37 @@ class App:
         LobsterLogo(title_row, size=40).pack(side="left", padx=(0, 8))
         tk.Label(title_row, text="ESP-Claw", font=Theme.FONT_TITLE, bg=Theme.BG,
                  fg=Theme.TEXT).pack(side="left")
-        tk.Label(wrap, text="Cari dan hubungkan device kamu", font=Theme.FONT, bg=Theme.BG,
+        tk.Label(wrap, text="Find and connect your device", font=Theme.FONT, bg=Theme.BG,
                  fg=Theme.DIM).pack(pady=(0, 16))
 
         self.spinner = Spinner(wrap)
         self.spinner.pack(pady=(0, 12))
 
-        self.scan_status_label = tk.Label(wrap, text="Mencari device di USB...", font=Theme.FONT,
+        self.scan_status_label = tk.Label(wrap, text="Searching for device on USB...", font=Theme.FONT,
                                            bg=Theme.BG, fg=Theme.TEXT)
         self.scan_status_label.pack(pady=(0, 16))
 
-        port_card = Card(wrap, padding=12)
-        port_card.pack(fill="x", pady=(0, 16))
-        columns = ("device", "vidpid", "desc")
-        self.port_tree = ttk.Treeview(port_card.body, columns=columns, show="headings", height=5,
-                                       selectmode="browse")
-        self.port_tree.heading("device", text="PORT")
-        self.port_tree.heading("vidpid", text="VID:PID")
-        self.port_tree.heading("desc", text="DESKRIPSI")
-        self.port_tree.column("device", width=110)
-        self.port_tree.column("vidpid", width=90)
-        self.port_tree.column("desc", width=260)
-        self.port_tree.pack(fill="x")
+        self.port_list_frame = tk.Frame(wrap, bg=Theme.BG, width=520)
+        self.port_list_frame.pack(fill="x", pady=(0, 16))
+        self.port_list_frame.pack_propagate(False)
 
         btn_row = tk.Frame(wrap, bg=Theme.BG)
         btn_row.pack()
-        self.connect_btn = PillButton(btn_row, "Hubungkan", command=self.connect_selected, width=140)
-        self.connect_btn.pack(side="left", padx=(0, 10))
-        self.connect_btn.set_enabled(False)
-        PillButton(btn_row, "Scan Ulang", command=self.start_scanning, width=140,
+        PillButton(btn_row, "Rescan", command=self.start_scanning, width=140,
                    bg=Theme.CARD, fg=Theme.TEXT, outline=True).pack(side="left")
 
         self.scan_error_label = tk.Label(wrap, text="", font=Theme.FONT, bg=Theme.BG, fg=Theme.RED)
         self.scan_error_label.pack(pady=(10, 0))
 
+        self.scan_hint_label = tk.Label(
+            wrap, text="Click a device to connect instantly — last used port/SSID is pre-highlighted.",
+            font=Theme.FONT, bg=Theme.BG, fg=Theme.DIM)
+        self.scan_hint_label.pack(pady=(4, 0))
+
     def start_scanning(self):
         self.scan_error_label.configure(text="")
         self.spinner.start()
-        self.scan_status_label.configure(text="Mencari device di USB...")
+        self.scan_status_label.configure(text="Searching for device on USB...")
         self._scanning = True
         self._auto_connected = False
         self._scan_tick()
@@ -117,43 +124,94 @@ class App:
             return
         matches, all_ports = find_candidate_ports()
         self._render_ports(all_ports)
-        self.connect_btn.set_enabled(len(all_ports) > 0)
 
         if matches and not self._auto_connected:
             self._auto_connected = True
             self._scanning = False
             self.spinner.stop()
             self.scan_status_label.configure(
-                text=f"Ditemukan ESP-Claw di {matches[0].device} — menghubungkan...")
+                text=f"Found ESP-Claw at {matches[0].device} — connecting...")
             self.root.after(500, lambda: self.connect_to(matches[0].device))
             return
 
         if not all_ports:
-            self.scan_status_label.configure(text="Tidak ada serial port terdeteksi. Colok ESP-Claw via USB.")
+            self.scan_status_label.configure(text="No serial ports detected. Plug in ESP-Claw via USB.")
         elif not matches:
             self.scan_status_label.configure(
-                text="Port terdeteksi, bukan ESP-Claw. Pilih manual atau colok device yang benar.")
+                text="Port detected, but not ESP-Claw. Pick manually or plug in the right device.")
         else:
             self.scan_status_label.configure(text="")
 
         self.root.after(900, self._scan_tick)
 
     def _render_ports(self, ports):
-        self.port_tree.delete(*self.port_tree.get_children())
-        self._port_devices = []
-        for p in ports:
-            vidpid = f"{p.vid:04x}:{p.pid:04x}" if p.vid else "-"
-            self.port_tree.insert("", "end", iid=p.device, values=(p.device, vidpid, p.description or ""))
-            self._port_devices.append(p.device)
+        for child in self.port_list_frame.winfo_children():
+            child.destroy()
 
-    def connect_selected(self):
-        sel = self.port_tree.selection()
-        port = sel[0] if sel else (self._port_devices[0] if self._port_devices else None)
-        if not port:
-            self.scan_error_label.configure(text="Pilih port dari daftar dulu.")
-            return
-        self._scanning = False
-        self.connect_to(port)
+        last_port = config_store.load().get("last_port")
+        for p in ports:
+            is_match = looks_like_esp_port(p)
+            is_recent = not is_match and p.device == last_port
+            self._build_port_row(self.port_list_frame, p, is_match, is_recent)
+
+    def _build_port_row(self, parent, port, is_match, is_recent):
+        border_color = Theme.ACCENT if (is_match or is_recent) else Theme.BORDER
+        row_bg = Theme.ACCENT_SOFT if is_match else Theme.CARD
+
+        row = tk.Frame(parent, bg=row_bg, highlightbackground=border_color, highlightthickness=1,
+                        cursor="hand2")
+        row.pack(fill="x", pady=(0, 8))
+        inner = tk.Frame(row, bg=row_bg)
+        inner.pack(fill="x", padx=14, pady=11)
+
+        icon_bg = Theme.ACCENT if is_match else Theme.BORDER
+        icon_fg = "#FFFFFF" if is_match else Theme.DIM
+        icon = tk.Label(inner, text="\U0001F50C" if is_match else "\U0001F4E1", font=("Segoe UI", 13),
+                         bg=icon_bg, fg=icon_fg, width=2, height=1)
+        icon.pack(side="left", padx=(0, 12))
+
+        info = tk.Frame(inner, bg=row_bg)
+        info.pack(side="left", fill="x", expand=True)
+        primary_row = tk.Frame(info, bg=row_bg)
+        primary_row.pack(anchor="w")
+        tk.Label(primary_row, text=port.device, font=("Segoe UI", 11, "bold"), bg=row_bg,
+                 fg=Theme.TEXT).pack(side="left")
+        if is_match:
+            tk.Label(primary_row, text=" ESP-CLAW ", font=("Segoe UI", 8, "bold"), bg=Theme.CARD,
+                     fg=Theme.ACCENT, highlightbackground=Theme.ACCENT, highlightthickness=1).pack(
+                side="left", padx=(8, 0))
+        elif is_recent:
+            tk.Label(primary_row, text=" last used ", font=("Segoe UI", 8, "bold"), bg=Theme.CARD,
+                     fg=Theme.DIM, highlightbackground=Theme.BORDER, highlightthickness=1).pack(
+                side="left", padx=(8, 0))
+
+        vidpid = f"{port.vid:04x}:{port.pid:04x}" if port.vid else "-"
+        desc = port.description or "Unknown device"
+        tk.Label(info, text=f"{vidpid} · {desc}", font=("Consolas", 9), bg=row_bg,
+                 fg=Theme.DIM).pack(anchor="w", pady=(2, 0))
+
+        chevron = tk.Label(inner, text="›", font=("Segoe UI", 14), bg=row_bg,
+                            fg=Theme.ACCENT if is_match else Theme.DIM)
+        chevron.pack(side="right")
+
+        def on_click(_event=None):
+            self._scanning = False
+            self.connect_to(port.device)
+
+        def on_enter(_event=None):
+            row.configure(highlightbackground=Theme.ACCENT)
+
+        def on_leave(_event=None):
+            row.configure(highlightbackground=border_color)
+
+        self._bind_recursive(row, "<Button-1>", on_click)
+        self._bind_recursive(row, "<Enter>", on_enter)
+        self._bind_recursive(row, "<Leave>", on_leave)
+
+    def _bind_recursive(self, widget, event, handler):
+        widget.bind(event, handler)
+        for child in widget.winfo_children():
+            self._bind_recursive(child, event, handler)
 
     # ---------- dashboard view ----------
 
@@ -179,7 +237,7 @@ class App:
         self.status_dot.pack(side="left", padx=(0, 6))
         self.dash_subtitle = tk.Label(status_row, text="", font=Theme.FONT, bg=Theme.CARD, fg=Theme.DIM)
         self.dash_subtitle.pack(side="left")
-        PillButton(hero_row, "Putuskan", command=self.disconnect_clicked, width=120, height=34,
+        PillButton(hero_row, "Disconnect", command=self.disconnect_clicked, width=120, height=34,
                    bg=Theme.CARD, fg=Theme.TEXT, outline=True).pack(side="right")
 
         stats_row = tk.Frame(outer, bg=Theme.BG)
@@ -203,7 +261,7 @@ class App:
         tab_row = tk.Frame(outer, bg=Theme.BG)
         tab_row.pack(fill="x")
         self.tab_buttons = {}
-        for key, label in (("console", "Console"), ("wifi", "WiFi"), ("web", "Tampilan Web")):
+        for key, label in (("console", "Console"), ("wifi", "WiFi"), ("web", "Web View")):
             btn = tk.Label(tab_row, text=label, font=Theme.FONT_BOLD, bg=Theme.BG, fg=Theme.DIM,
                            padx=16, pady=8, cursor="hand2")
             btn.pack(side="left")
@@ -252,7 +310,7 @@ class App:
                                    relief="flat", highlightbackground=Theme.BORDER, highlightthickness=1)
         self.cmd_entry.pack(side="left", fill="x", expand=True, ipady=8, padx=(0, 8))
         self.cmd_entry.bind("<Return>", lambda e: self.send_clicked())
-        PillButton(input_row, "Kirim", command=self.send_clicked, width=90, height=36).pack(side="left")
+        PillButton(input_row, "Send", command=self.send_clicked, width=90, height=36).pack(side="left")
 
     def _build_wifi_panel(self):
         self.wifi_panel = tk.Frame(self.panel_container, bg=Theme.CARD)
@@ -274,8 +332,8 @@ class App:
         self.ap_tree = ttk.Treeview(ap_frame, columns=columns, show="headings", height=8,
                                      selectmode="browse")
         self.ap_tree.heading("ssid", text="SSID")
-        self.ap_tree.heading("signal", text="SINYAL")
-        self.ap_tree.heading("security", text="KEAMANAN")
+        self.ap_tree.heading("signal", text="SIGNAL")
+        self.ap_tree.heading("security", text="SECURITY")
         self.ap_tree.column("ssid", width=220)
         self.ap_tree.column("signal", width=90)
         self.ap_tree.column("security", width=120)
@@ -293,9 +351,13 @@ class App:
                                              highlightthickness=1)
         self.wifi_password_entry.pack(side="left", fill="x", expand=True, ipady=8, padx=(0, 8))
         self.wifi_password_entry.bind("<Return>", lambda e: self.connect_wifi())
-        PillButton(form_row, "Konek", command=self.connect_wifi, width=90, height=36).pack(
+        self.pw_toggle_btn = tk.Label(form_row, text="Show", font=Theme.FONT, bg=Theme.CARD,
+                                       fg=Theme.DIM, cursor="hand2", padx=6)
+        self.pw_toggle_btn.pack(side="left", padx=(0, 8))
+        self.pw_toggle_btn.bind("<Button-1>", lambda e: self._toggle_password_visibility())
+        PillButton(form_row, "Connect", command=self.connect_wifi, width=90, height=36).pack(
             side="left", padx=(0, 8))
-        PillButton(form_row, "Batal", command=self.cancel_wifi_form, width=90, height=36,
+        PillButton(form_row, "Cancel", command=self.cancel_wifi_form, width=90, height=36,
                    bg=Theme.CARD, fg=Theme.TEXT, outline=True).pack(side="left")
         self.wifi_connect_status = tk.Label(self.wifi_form, text="", font=Theme.FONT, bg=Theme.CARD,
                                              fg=Theme.DIM)
@@ -306,7 +368,7 @@ class App:
         pad = tk.Frame(self.web_panel, bg=Theme.CARD)
         pad.pack(fill="both", expand=True, padx=16, pady=16)
 
-        tk.Label(pad, text="Buka halaman web settings ESP-Claw di browser sistem:",
+        tk.Label(pad, text="Open the ESP-Claw web settings page in your system browser:",
                  font=Theme.FONT, bg=Theme.CARD, fg=Theme.TEXT).pack(anchor="w", pady=(0, 10))
 
         row = tk.Frame(pad, bg=Theme.CARD)
@@ -315,10 +377,10 @@ class App:
                                       highlightbackground=Theme.BORDER, highlightthickness=1)
         self.web_ip_entry.insert(0, "192.168.4.1")
         self.web_ip_entry.pack(side="left", fill="x", expand=True, ipady=8, padx=(0, 8))
-        PillButton(row, "Buka di Browser", command=self.open_web_ui, width=160, height=36).pack(side="left")
+        PillButton(row, "Open in Browser", command=self.open_web_ui, width=160, height=36).pack(side="left")
 
-        tk.Label(pad, text=("Default IP mode Access Point: 192.168.4.1. Kalau sudah konek WiFi, "
-                             "IP akan terisi otomatis dari status WiFi device."),
+        tk.Label(pad, text=("Default Access Point IP: 192.168.4.1. Once connected to WiFi, "
+                             "the IP fills in automatically from the device's WiFi status."),
                  font=Theme.FONT, bg=Theme.CARD, fg=Theme.DIM, justify="left", wraplength=520).pack(
             anchor="w", pady=(14, 0))
 
@@ -351,10 +413,12 @@ class App:
     def connect_to(self, port, baud=DEFAULT_BAUD):
         if self.ser is not None:
             self._close_serial()
+        self._disconnect_requested = False
+        self._reconnect_attempts = 0
         try:
             self.ser = serial.Serial(port, baud, timeout=0.2)
         except serial.SerialException as e:
-            self.scan_error_label.configure(text=f"Gagal buka {port}: {e}")
+            self.scan_error_label.configure(text=f"Failed to open {port}: {e}")
             self.start_scanning()
             return
         self.reader_stop.clear()
@@ -364,11 +428,13 @@ class App:
             reset_device(self.ser)
         except (serial.SerialException, OSError) as e:
             self._close_serial()
-            self.scan_error_label.configure(text=f"Device terputus saat konek ke {port}: {e}")
+            self.scan_error_label.configure(text=f"Device disconnected while connecting to {port}: {e}")
             self.start_scanning()
             return
 
-        self.dash_subtitle.configure(text=f"Terhubung · {port} @ {baud}")
+        self._last_port = port
+        config_store.save(last_port=port)
+        self.dash_subtitle.configure(text=f"Connected · {port} @ {baud}")
         self.link_value_label.configure(text=f"{port.split('/')[-1]} @ {baud}")
         self.wifi_value_label.configure(text="—", fg=Theme.TEXT)
         self._clear_console()
@@ -378,6 +444,7 @@ class App:
         self.root.after(3000, lambda: self.quick("wifi --status"))
 
     def disconnect_clicked(self):
+        self._disconnect_requested = True
         self._close_serial()
         self.show_scan_view()
         self.start_scanning()
@@ -416,14 +483,52 @@ class App:
             while True:
                 item = self.msg_queue.get_nowait()
                 if item is None:
-                    self._append_console("\n[Koneksi terputus]\n")
-                    self.root.after(800, self.disconnect_clicked)
+                    self._append_console("\n[Connection lost]\n")
+                    self.root.after(800, self._handle_unexpected_disconnect)
                 else:
                     self._append_console(item)
                     self._on_serial_text(item)
         except queue.Empty:
             pass
         self.root.after(50, self._poll_queue)
+
+    # ---------- reconnect ----------
+
+    def _handle_unexpected_disconnect(self):
+        if self._disconnect_requested or not self._last_port:
+            self.disconnect_clicked()
+            return
+        self._reconnect_attempts = 0
+        self._attempt_reconnect()
+
+    def _attempt_reconnect(self):
+        if self._disconnect_requested:
+            return
+        self._reconnect_attempts += 1
+        port = self._last_port
+        self._append_console(
+            f"\n[Reconnecting to {port}... attempt {self._reconnect_attempts}/{MAX_RECONNECT_ATTEMPTS}]\n")
+        self.dash_subtitle.configure(text=f"Reconnecting to {port}...")
+        try:
+            self.ser = serial.Serial(port, DEFAULT_BAUD, timeout=0.2)
+        except serial.SerialException:
+            self.ser = None
+
+        if self.ser is not None:
+            self.reader_stop.clear()
+            self.reader_thread = threading.Thread(target=self._read_loop, daemon=True)
+            self.reader_thread.start()
+            self._reconnect_attempts = 0
+            self._append_console("[Reconnected]\n")
+            self.dash_subtitle.configure(text=f"Connected · {port} @ {DEFAULT_BAUD}")
+            self.root.after(1000, lambda: self.quick("wifi --status"))
+            return
+
+        if self._reconnect_attempts >= MAX_RECONNECT_ATTEMPTS:
+            self._append_console("[Reconnect failed, returning to device search]\n")
+            self.root.after(500, self.disconnect_clicked)
+        else:
+            self.root.after(RECONNECT_INTERVAL_MS, self._attempt_reconnect)
 
     def _write_serial(self, text):
         ser = self.ser
@@ -449,7 +554,7 @@ class App:
                 self.wifi_scan_btn.set_enabled(True)
                 self.ap_results = aps
                 self.wifi_scan_status.configure(
-                    text=f"{len(aps)} jaringan ditemukan." if aps else "Tidak ada jaringan ditemukan.")
+                    text=f"{len(aps)} network(s) found." if aps else "No networks found.")
                 self._render_ap_list()
 
     def _apply_wifi_status(self, kv):
@@ -458,13 +563,13 @@ class App:
             self.wifi_value_label.configure(text=kv.get("saved_ssid", "?"), fg=Theme.GREEN)
             ip = kv.get("sta_ip")
             if ip:
-                self.dash_subtitle.configure(text=f"Terhubung · IP {ip}")
+                self.dash_subtitle.configure(text=f"Connected · IP {ip}")
                 if not self.web_ip_filled:
                     self.web_ip_entry.delete(0, "end")
                     self.web_ip_entry.insert(0, ip)
                     self.web_ip_filled = True
         elif connected == "0":
-            self.wifi_value_label.configure(text="Terputus", fg=Theme.RED)
+            self.wifi_value_label.configure(text="Disconnected", fg=Theme.RED)
 
     # ---------- console panel actions ----------
 
@@ -484,7 +589,7 @@ class App:
         self._write_serial(cmd)
 
     def reset_clicked(self):
-        self._append_console("\n[Reset device]\n")
+        self._append_console("\n[Resetting device]\n")
         ser = self.ser
         if ser is not None:
             try:
@@ -509,7 +614,7 @@ class App:
         self.wifi_scanning = True
         self.wifi_form.pack_forget()
         self.wifi_scan_btn.set_enabled(False)
-        self.wifi_scan_status.configure(text="Scanning... (~5 detik)")
+        self.wifi_scan_status.configure(text="Scanning... (~5 seconds)")
         self._render_ap_list()
         self.quick("wifi --scan")
         self.root.after(9000, self._scan_wifi_timeout)
@@ -519,17 +624,23 @@ class App:
             self.wifi_scanning = False
             self.wifi_scan_btn.set_enabled(True)
             self.wifi_scan_status.configure(
-                text="" if self.ap_results else "Tidak ada jaringan ditemukan, coba scan ulang.")
+                text="" if self.ap_results else "No networks found, try scanning again.")
 
     def _render_ap_list(self):
         self.ap_tree.delete(*self.ap_tree.get_children())
         self._ap_by_iid = {}
         for i, ap in enumerate(self.ap_results):
-            security = "Terbuka" if ap["auth"] == "open" else f"\U0001F512 {ap['auth']}"
+            security = "Open" if ap["auth"] == "open" else f"\U0001F512 {ap['auth']}"
             bars = signal_bars(ap["rssi"])
             iid = f"ap{i}"
             self.ap_tree.insert("", "end", iid=iid, values=(ap["ssid"], f"{ap['rssi']} dBm ({bars}/4)", security))
             self._ap_by_iid[iid] = ap
+
+        last_ssid = config_store.load().get("last_ssid")
+        for iid, ap in self._ap_by_iid.items():
+            if ap["ssid"] == last_ssid:
+                self.ap_tree.selection_set(iid)
+                break
 
     def _on_ap_select(self, _event):
         sel = self.ap_tree.selection()
@@ -540,9 +651,12 @@ class App:
             return
         self.selected_ap = ap
         open_net = ap["auth"] == "open"
-        title = f"Konek ke {ap['ssid']}" + ("  (jaringan terbuka)" if open_net else "")
+        title = f"Connect to {ap['ssid']}" + ("  (open network)" if open_net else "")
         self.wifi_form_title.configure(text=title)
         self.wifi_password_entry.delete(0, "end")
+        self._pw_visible = False
+        self.wifi_password_entry.configure(show="*")
+        self.pw_toggle_btn.configure(text="Show")
         self.wifi_connect_status.configure(text="")
         self.wifi_form.pack(fill="x", pady=(4, 0))
 
@@ -552,17 +666,22 @@ class App:
         for iid in self.ap_tree.selection():
             self.ap_tree.selection_remove(iid)
 
+    def _toggle_password_visibility(self):
+        self._pw_visible = not self._pw_visible
+        self.wifi_password_entry.configure(show="" if self._pw_visible else "*")
+        self.pw_toggle_btn.configure(text="Hide" if self._pw_visible else "Show")
+
     def connect_wifi(self):
         if not self.selected_ap:
             return
         ssid = self.selected_ap["ssid"]
         password = self.wifi_password_entry.get()
-        ssid_esc = ssid.replace('"', '\\"')
-        pw_esc = password.replace('"', '\\"')
-        command = f'wifi --set --ssid "{ssid_esc}" --password "{pw_esc}" --apply'
-        self._append_console(f'\n> wifi --set --ssid "{ssid_esc}" --password **** --apply\n')
+        command = (f"wifi --set --ssid {quote_console_arg(ssid)} "
+                   f"--password {quote_console_arg(password)} --apply")
+        self._append_console(f"\n> wifi --set --ssid {quote_console_arg(ssid)} --password **** --apply\n")
         self._write_serial(command)
-        self.wifi_connect_status.configure(text=f"Menghubungkan ke {ssid}...")
+        config_store.save(last_ssid=ssid)
+        self.wifi_connect_status.configure(text=f"Connecting to {ssid}...")
         self.root.after(4000, lambda: self.quick("wifi --status"))
 
 

@@ -6,35 +6,73 @@ import time
 import serial
 import serial.tools.list_ports
 
+from espclaw_ctl import config_store
+
 DEFAULT_BAUD = 115200
-# QinHeng CH34x "USB Single Serial" — the USB-serial chip on the ESP-Claw board.
-CH340_VID_PID = (0x1A86, 0x55D3)
+
+# Known USB-to-serial chip VID:PID pairs seen on ESP32 dev boards.
+KNOWN_VID_PID = {
+    (0x1A86, 0x7523): "CH340",
+    (0x1A86, 0x55D3): "CH9102",  # QinHeng CH34x "USB Single Serial" — ESP-Claw breadboard board
+    (0x10C4, 0xEA60): "CP210x",
+    (0x0403, 0x6001): "FTDI FT232",
+    (0x0403, 0x6015): "FTDI FT231X",
+}
+# ESP32-S2/S3/C3 built-in native USB-Serial/JTAG — pid varies by chip/mode, match by vendor only.
+ESPRESSIF_USB_VID = 0x303A
+_DESC_HINTS = ("ch340", "ch9102", "cp210", "ftdi", "usb-serial", "usb serial", "usb jtag", "silicon labs")
+
+
+def looks_like_esp_port(port):
+    """True if a serial.tools.list_ports port-like object looks like an ESP32 USB-serial link."""
+    if port.vid is None:
+        return False
+    if (port.vid, port.pid) in KNOWN_VID_PID:
+        return True
+    if port.vid == ESPRESSIF_USB_VID:
+        return True
+    desc = (port.description or "").lower()
+    return any(hint in desc for hint in _DESC_HINTS)
 
 
 def find_candidate_ports():
     ports = list(serial.tools.list_ports.comports())
-    matches = [p for p in ports if (p.vid, p.pid) == CH340_VID_PID]
+    matches = [p for p in ports if looks_like_esp_port(p)]
     return matches, ports
+
+
+def quote_console_arg(value):
+    """Quote a value for the ESP-Claw console's double-quoted argument parser."""
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
 
 
 def resolve_port(explicit_port):
     if explicit_port:
+        config_store.save(last_port=explicit_port)
         return explicit_port
     matches, all_ports = find_candidate_ports()
     if len(matches) == 1:
+        config_store.save(last_port=matches[0].device)
         return matches[0].device
     if len(matches) > 1:
-        print("Ditemukan lebih dari satu device CH340, pilih salah satu dengan --port:", file=sys.stderr)
+        print("Found more than one ESP32 device, pick one with --port:", file=sys.stderr)
         for p in matches:
             print(f"  {p.device}  serial={p.serial_number}  {p.description}", file=sys.stderr)
         sys.exit(1)
-    print("Tidak ada device ESP-Claw (CH340) yang terdeteksi.", file=sys.stderr)
+
+    last_port = config_store.load().get("last_port")
+    if last_port and any(p.device == last_port for p in all_ports):
+        print(f"No known VID:PID match, using last used port: {last_port}", file=sys.stderr)
+        return last_port
+
+    print("No ESP-Claw device detected.", file=sys.stderr)
     if all_ports:
-        print("Serial port yang tersedia:", file=sys.stderr)
+        print("Available serial ports:", file=sys.stderr)
         for p in all_ports:
             vidpid = f"{p.vid:04x}:{p.pid:04x}" if p.vid else "-"
             print(f"  {p.device}\t{vidpid}\t{p.description}", file=sys.stderr)
-    print("Gunakan --port <device> untuk pilih manual, atau jalankan 'espclawctl list'.", file=sys.stderr)
+    print("Use --port <device> to pick manually, or run 'espclawctl list'.", file=sys.stderr)
     sys.exit(1)
 
 
@@ -72,17 +110,17 @@ def open_serial(port, baud):
     try:
         return serial.Serial(port, baud, timeout=0.2)
     except serial.SerialException as e:
-        print(f"Gagal buka {port}: {e}", file=sys.stderr)
+        print(f"Failed to open {port}: {e}", file=sys.stderr)
         sys.exit(1)
 
 
 def cmd_list(args):
     ports = list(serial.tools.list_ports.comports())
     if not ports:
-        print("Tidak ada serial port terdeteksi.")
+        print("No serial ports detected.")
         return
     for p in ports:
-        tag = "  <- kemungkinan ESP-Claw" if p.vid and (p.vid, p.pid) == CH340_VID_PID else ""
+        tag = "  <- likely ESP-Claw" if looks_like_esp_port(p) else ""
         vidpid = f"{p.vid:04x}:{p.pid:04x}" if p.vid else "-"
         print(f"{p.device}\t{vidpid}\t{p.description}{tag}")
 
@@ -90,7 +128,7 @@ def cmd_list(args):
 def cmd_reset(args):
     port = resolve_port(args.port)
     ser = open_serial(port, args.baud)
-    print(f"Reset {port} ...", file=sys.stderr)
+    print(f"Resetting {port} ...", file=sys.stderr)
     reset_device(ser)
     data = read_idle(ser, idle_ms=800, max_total=args.timeout)
     ser.close()
@@ -122,16 +160,17 @@ def cmd_wifi_scan(args):
 
 
 def cmd_wifi_set(args):
-    command = f'wifi --set --ssid "{args.ssid}" --password "{args.password}"'
+    command = f"wifi --set --ssid {quote_console_arg(args.ssid)} --password {quote_console_arg(args.password)}"
     if not args.save_only:
         command += " --apply"
     _run_and_print(args, command, timeout=max(args.timeout, 12.0))
+    config_store.save(last_ssid=args.ssid)
 
 
 def cmd_console(args):
     port = resolve_port(args.port)
     ser = open_serial(port, args.baud)
-    print(f"Terhubung ke {port} @ {args.baud} baud. Ctrl+C untuk keluar.", file=sys.stderr)
+    print(f"Connected to {port} @ {args.baud} baud. Ctrl+C to quit.", file=sys.stderr)
     if args.reset:
         reset_device(ser)
 
@@ -159,44 +198,44 @@ def cmd_console(args):
     finally:
         stop.set()
         ser.close()
-        print("\nTerputus.", file=sys.stderr)
+        print("\nDisconnected.", file=sys.stderr)
 
 
 def build_parser():
     p = argparse.ArgumentParser(
         prog="espclawctl",
-        description="Kontrol ESP-Claw (ESP32-S3) via console USB serial-nya.",
+        description="Control ESP-Claw (ESP32-S3) over its USB serial console.",
     )
-    p.add_argument("--port", help="Serial port, misal /dev/ttyACM0 atau COM5. Auto-detect kalau tidak diisi.")
+    p.add_argument("--port", help="Serial port, e.g. /dev/ttyACM0 or COM5. Auto-detected if not given.")
     p.add_argument("--baud", type=int, default=DEFAULT_BAUD, help=f"Baud rate (default {DEFAULT_BAUD})")
-    p.add_argument("--timeout", type=float, default=8.0, help="Batas waktu tunggu respons dalam detik (default 8)")
+    p.add_argument("--timeout", type=float, default=8.0, help="Response wait timeout in seconds (default 8)")
 
     sub = p.add_subparsers(dest="action", required=True)
 
-    sp = sub.add_parser("list", help="List semua serial port yang terdeteksi")
+    sp = sub.add_parser("list", help="List all detected serial ports")
     sp.set_defaults(func=cmd_list)
 
-    sp = sub.add_parser("console", help="Buka terminal interaktif ke console ESP-Claw")
-    sp.add_argument("--reset", action="store_true", help="Reset device dulu sebelum masuk console (lihat boot log)")
+    sp = sub.add_parser("console", help="Open an interactive terminal to the ESP-Claw console")
+    sp.add_argument("--reset", action="store_true", help="Reset the device before entering the console (see boot log)")
     sp.set_defaults(func=cmd_console)
 
-    sp = sub.add_parser("cmd", help="Kirim satu command console dan tampilkan hasilnya")
-    sp.add_argument("command", help='Command console, misal: "help" atau "wifi --status"')
+    sp = sub.add_parser("cmd", help="Send a single console command and print the result")
+    sp.add_argument("command", help='Console command, e.g. "help" or "wifi --status"')
     sp.set_defaults(func=cmd_cmd)
 
-    sp = sub.add_parser("reset", help="Reset device dan tampilkan boot log")
+    sp = sub.add_parser("reset", help="Reset the device and print the boot log")
     sp.set_defaults(func=cmd_reset)
 
-    sp = sub.add_parser("wifi-status", help="Tampilkan status WiFi device")
+    sp = sub.add_parser("wifi-status", help="Show the device's WiFi status")
     sp.set_defaults(func=cmd_wifi_status)
 
-    sp = sub.add_parser("wifi-scan", help="Scan AP WiFi terdekat")
+    sp = sub.add_parser("wifi-scan", help="Scan nearby WiFi access points")
     sp.set_defaults(func=cmd_wifi_scan)
 
-    sp = sub.add_parser("wifi-set", help="Set kredensial WiFi baru (default langsung apply)")
+    sp = sub.add_parser("wifi-set", help="Set new WiFi credentials (applies immediately by default)")
     sp.add_argument("--ssid", required=True)
     sp.add_argument("--password", required=True)
-    sp.add_argument("--save-only", action="store_true", help="Simpan tanpa langsung apply/reconnect")
+    sp.add_argument("--save-only", action="store_true", help="Save without applying/reconnecting immediately")
     sp.set_defaults(func=cmd_wifi_set)
 
     return p
