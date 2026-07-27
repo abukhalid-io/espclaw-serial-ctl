@@ -13,6 +13,9 @@ dependencies = [
     "pyserial>=3.5",
 ]
 
+[project.optional-dependencies]
+gui = ["pywebview>=6.0"]
+
 [project.scripts]
 espclawctl = "espclaw_ctl.cli:main"
 
@@ -21,3 +24,7 @@ espclawctl-gui = "espclaw_ctl.gui:main"
 
 [tool.setuptools]
 packages = ["espclaw_ctl"]
+include-package-data = true
+
+[tool.setuptools.package-data]
+"espclaw_ctl" = ["webapp/*.html", "webapp/*.css", "webapp/*.js"]
