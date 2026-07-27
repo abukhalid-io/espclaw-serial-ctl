@@ -17,17 +17,10 @@ pip install -r requirements.txt
 Atau install sebagai command (`espclawctl` / `espclawctl-gui`) di PATH:
 
 ```bash
-pip install -e .        # cuma CLI
-pip install -e .[gui]   # CLI + GUI (pywebview)
+pip install -e .
 ```
 
-**Requirement**: Python 3.8+. GUI-nya pakai [pywebview](https://pywebview.flowrl.com/) (webview native, bukan browser terpisah), jadi butuh dependency sistem tambahan:
-
-- **Linux**: `sudo apt install python3-gi gir1.2-webkit2-4.1` (WebKitGTK + PyGObject — biasanya sudah ada di banyak distro desktop).
-- **Windows**: pakai WebView2 (Microsoft Edge runtime), biasanya sudah terpasang bawaan Windows 10/11.
-- **Mac**: pakai WKWebView bawaan macOS, tidak perlu instalasi tambahan.
-
-`pywebview` sendiri terpasang otomatis lewat `pip install -r requirements.txt` / `pip install -e .[gui]`.
+**Requirement**: Python 3.8+. GUI-nya pakai **Tkinter** (ringan, bawaan Python) — biasanya sudah ada di Windows/Mac, di Linux kadang perlu `sudo apt install python3-tk`. Tidak ada dependency sistem tambahan.
 
 ## Pakai GUI
 
@@ -37,14 +30,13 @@ python -m espclaw_ctl.gui
 espclawctl-gui
 ```
 
-GUI-nya berupa window native (pakai pywebview), bukan buka di browser.
-
 Alur GUI:
 1. Window terbuka, otomatis **scan USB** mencari device ESP-Claw (CH340).
 2. Begitu ketemu, otomatis **konek** dan masuk ke dashboard: kartu status WiFi & serial link.
 3. Tab **Console** — kirim command manual, lihat live output serial (mirip `console` di CLI).
-4. Tab **Tampilan Web** — menampilkan halaman web settings ESP-Claw asli (yang di-serve device di port 80) langsung di dalam app lewat iframe, dengan kolom IP manual (default `192.168.4.1`) dan tombol untuk buka di window terpisah.
-5. Kalau device tidak terdeteksi, semua serial port yang ada tetap ditampilkan supaya bisa pilih manual.
+4. Tab **WiFi** — scan access point di sekitar, klik salah satu, masukkan password (kalau bukan jaringan terbuka), lalu **Konek** — otomatis kirim `wifi --set --ssid ... --password ... --apply` ke device.
+5. Tab **Tampilan Web** — kolom IP device (default `192.168.4.1`, otomatis terisi begitu device konek WiFi) dengan tombol untuk buka halaman web settings ESP-Claw asli di browser sistem kamu.
+6. Kalau device tidak terdeteksi, semua serial port yang ada tetap ditampilkan supaya bisa pilih manual.
 
 ### Bikin shortcut desktop (Linux)
 
