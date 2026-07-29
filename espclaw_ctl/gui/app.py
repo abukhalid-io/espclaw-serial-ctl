@@ -16,7 +16,13 @@ from espclaw_ctl.cli import (
 )
 from espclaw_ctl.gui.theme import Theme
 from espclaw_ctl.gui.widgets import Card, LobsterLogo, PillButton, Spinner, StatusDot
-from espclaw_ctl.gui.wifi_parse import parse_wifi_scan, parse_wifi_set_result, parse_wifi_status, signal_bars
+from espclaw_ctl.gui.wifi_parse import (
+    parse_wifi_scan,
+    parse_wifi_scan_failure,
+    parse_wifi_set_result,
+    parse_wifi_status,
+    signal_bars,
+)
 
 MAX_RECONNECT_ATTEMPTS = 5
 RECONNECT_INTERVAL_MS = 1500
@@ -54,6 +60,7 @@ class App:
         self.wifi_set_buffer = ""
         self.wifi_set_pending = None
         self._wifi_set_gen = 0
+        self._scan_retries_left = 0
 
         self._setup_style()
         self._build_scan_view()
@@ -552,6 +559,10 @@ class App:
 
         if self.wifi_scanning:
             self.wifi_scan_buffer += text
+            failure = parse_wifi_scan_failure(self.wifi_scan_buffer)
+            if failure is not None:
+                self._handle_wifi_scan_failure(failure)
+                return
             aps = parse_wifi_scan(self.wifi_scan_buffer)
             if aps is not None:
                 self.wifi_scanning = False
@@ -622,12 +633,33 @@ class App:
         self.selected_ap = None
         self.wifi_scan_buffer = ""
         self.wifi_scanning = True
+        # Scanning switches the radio to STA+AP mode too, so it can hit the
+        # same ESP_ERR_WIFI_STATE busy race as wifi --set --apply whenever
+        # the device's own background STA reconnect loop is mid-attempt.
+        self._scan_retries_left = 8
         self.wifi_form.pack_forget()
         self.wifi_scan_btn.set_enabled(False)
         self.wifi_scan_status.configure(text="Scanning... (~5 seconds)")
         self._render_ap_list()
         self.quick("wifi --scan")
-        self.root.after(9000, self._scan_wifi_timeout)
+        self.root.after(20000, self._scan_wifi_timeout)
+
+    def _handle_wifi_scan_failure(self, err):
+        if err == "ESP_ERR_WIFI_STATE" and self._scan_retries_left > 0:
+            self._scan_retries_left -= 1
+            self.wifi_scan_buffer = ""
+            self.wifi_scan_status.configure(text="Device busy reconnecting, retrying scan...")
+            self.root.after(1500, self._retry_scan)
+            return
+        self.wifi_scanning = False
+        self.wifi_scan_btn.set_enabled(True)
+        self.wifi_scan_status.configure(text=f"Scan failed ({err}). Try again.")
+
+    def _retry_scan(self):
+        if not self.wifi_scanning:
+            return
+        self.wifi_scan_buffer = ""
+        self._write_serial("wifi --scan")
 
     def _scan_wifi_timeout(self):
         if self.wifi_scanning:
