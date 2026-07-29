@@ -635,12 +635,10 @@ class App:
             iid = f"ap{i}"
             self.ap_tree.insert("", "end", iid=iid, values=(ap["ssid"], f"{ap['rssi']} dBm ({bars}/4)", security))
             self._ap_by_iid[iid] = ap
-
-        last_ssid = config_store.load().get("last_ssid")
-        for iid, ap in self._ap_by_iid.items():
-            if ap["ssid"] == last_ssid:
-                self.ap_tree.selection_set(iid)
-                break
+        # Note: no auto-selecting the last-used SSID here — with open
+        # networks now connecting immediately on selection (see
+        # _on_ap_select), programmatically pre-selecting a row would
+        # silently trigger a reconnect attempt with no user action.
 
     def _on_ap_select(self, _event):
         sel = self.ap_tree.selection()
@@ -650,9 +648,16 @@ class App:
         if not ap:
             return
         self.selected_ap = ap
-        open_net = ap["auth"] == "open"
-        title = f"Connect to {ap['ssid']}" + ("  (open network)" if open_net else "")
-        self.wifi_form_title.configure(text=title)
+
+        if ap["auth"] == "open":
+            # No password needed — connect right away, no popup.
+            self.wifi_form.pack_forget()
+            self.wifi_password_entry.delete(0, "end")
+            self.wifi_scan_status.configure(text=f"Connecting to {ap['ssid']}...")
+            self.connect_wifi()
+            return
+
+        self.wifi_form_title.configure(text=f"Connect to {ap['ssid']}")
         self.wifi_password_entry.delete(0, "end")
         self._pw_visible = False
         self.wifi_password_entry.configure(show="*")
