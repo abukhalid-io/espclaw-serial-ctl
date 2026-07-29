@@ -3,6 +3,22 @@ import re
 _STATUS_KV_RE = re.compile(r"(\w+)=(\S+)")
 _SCAN_DONE_RE = re.compile(r"cmd=scan ok=(\d) count=(\d+)")
 _AP_RE = re.compile(r"ap idx=\d+ rssi=(-?\d+) ch=(\d+) auth=(\S+) ssid=(.+)")
+_SET_RESULT_RE = re.compile(r"cmd=set ok=(\d)(?:\s+err=(\S+))?")
+
+
+def parse_wifi_set_result(buffer):
+    """Parse the device's response to 'wifi --set ... --apply'.
+
+    Returns None until a 'cmd=set ok=...' line has been seen, then a dict
+    {"ok": bool, "err": str or None}. The device can reject this command
+    with err=ESP_ERR_WIFI_STATE ("sta is connecting, cannot set config")
+    when its own background STA reconnect loop happens to be mid-attempt —
+    a transient, retryable condition, not a real failure.
+    """
+    m = _SET_RESULT_RE.search(buffer)
+    if not m:
+        return None
+    return {"ok": m.group(1) == "1", "err": m.group(2)}
 
 
 def parse_wifi_status(buffer):

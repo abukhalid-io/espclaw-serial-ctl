@@ -16,7 +16,7 @@ from espclaw_ctl.cli import (
 )
 from espclaw_ctl.gui.theme import Theme
 from espclaw_ctl.gui.widgets import Card, LobsterLogo, PillButton, Spinner, StatusDot
-from espclaw_ctl.gui.wifi_parse import parse_wifi_scan, parse_wifi_status, signal_bars
+from espclaw_ctl.gui.wifi_parse import parse_wifi_scan, parse_wifi_set_result, parse_wifi_status, signal_bars
 
 MAX_RECONNECT_ATTEMPTS = 5
 RECONNECT_INTERVAL_MS = 1500
@@ -50,6 +50,10 @@ class App:
         self.ap_results = []
         self.selected_ap = None
         self.web_ip_filled = False
+
+        self.wifi_set_buffer = ""
+        self.wifi_set_pending = None
+        self._wifi_set_gen = 0
 
         self._setup_style()
         self._build_scan_view()
@@ -557,6 +561,12 @@ class App:
                     text=f"{len(aps)} network(s) found." if aps else "No networks found.")
                 self._render_ap_list()
 
+        if self.wifi_set_pending is not None:
+            self.wifi_set_buffer += text
+            result = parse_wifi_set_result(self.wifi_set_buffer)
+            if result is not None:
+                self._handle_wifi_set_result(result)
+
     def _apply_wifi_status(self, kv):
         connected = kv.get("sta_connected")
         if connected == "1":
@@ -683,11 +693,57 @@ class App:
         password = self.wifi_password_entry.get()
         command = (f"wifi --set --ssid {quote_console_arg(ssid)} "
                    f"--password {quote_console_arg(password)} --apply")
+
+        self._wifi_set_gen += 1
+        gen = self._wifi_set_gen
+        # Device rejects --set --apply with ESP_ERR_WIFI_STATE ("sta is
+        # connecting, cannot set config") whenever its own background STA
+        # reconnect loop is mid-attempt at that instant. That loop retries
+        # roughly every 10s and each attempt fails fast, so most of that
+        # window is actually idle — retrying a few times a couple seconds
+        # apart reliably lands in that idle gap instead of silently no-op'ing.
+        self.wifi_set_pending = {"ssid": ssid, "command": command, "retries_left": 8, "gen": gen}
+        self.wifi_set_buffer = ""
+
+        config_store.save(last_ssid=ssid)
+        self.wifi_connect_status.configure(text=f"Applying Wi-Fi config for {ssid}...")
         self._append_console(f"\n> wifi --set --ssid {quote_console_arg(ssid)} --password **** --apply\n")
         self._write_serial(command)
-        config_store.save(last_ssid=ssid)
-        self.wifi_connect_status.configure(text=f"Connecting to {ssid}...")
-        self.root.after(4000, lambda: self.quick("wifi --status"))
+
+    def _retry_wifi_set(self, gen):
+        pending = self.wifi_set_pending
+        if pending is None or pending["gen"] != gen:
+            return
+        self.wifi_set_buffer = ""
+        self._write_serial(pending["command"])
+
+    def _handle_wifi_set_result(self, result):
+        pending = self.wifi_set_pending
+        if pending is None:
+            return
+
+        if result["ok"]:
+            self.wifi_set_pending = None
+            self.wifi_connect_status.configure(text=f"Applied — connecting to {pending['ssid']}...")
+            self.root.after(4000, lambda: self.quick("wifi --status"))
+            return
+
+        err = result["err"] or "unknown_error"
+        if err == "ESP_ERR_WIFI_STATE" and pending["retries_left"] > 0:
+            pending["retries_left"] -= 1
+            gen = pending["gen"]
+            # Clear now, not just inside _retry_wifi_set: otherwise any
+            # further chatter arriving during the 1.5s wait keeps matching
+            # this same stale "ok=0" line and re-triggers this branch on
+            # every poll tick, burning through retries in a tight loop.
+            self.wifi_set_buffer = ""
+            self.wifi_connect_status.configure(text="Device busy reconnecting, retrying...")
+            self.root.after(1500, lambda: self._retry_wifi_set(gen))
+            return
+
+        self.wifi_set_pending = None
+        self.wifi_connect_status.configure(
+            text=f"Failed to apply Wi-Fi config ({err}). Try Connect again.")
 
 
 def main(argv=None):
