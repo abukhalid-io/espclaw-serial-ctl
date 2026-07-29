@@ -10,6 +10,13 @@ _ASSETS_DIR = os.path.join(os.path.dirname(__file__), "assets")
 _LOGO_PATH = os.path.join(_ASSETS_DIR, "logo.png")
 
 
+def _darken(hex_color, factor=0.82):
+    hex_color = hex_color.lstrip("#")
+    r, g, b = (int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
+    r, g, b = (max(0, int(c * factor)) for c in (r, g, b))
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
 class PillButton(tk.Canvas):
     def __init__(self, master, text, command=None, width=140, height=38,
                  bg=Theme.ACCENT, fg="#FFFFFF", font=Theme.FONT_BOLD, outline=False, **kw):
@@ -27,6 +34,7 @@ class PillButton(tk.Canvas):
         self._outline = outline
         self._command = command
         self._enabled = True
+        self._pressed = False
         self._draw()
         self.bind("<Button-1>", self._on_click)
         self.bind("<Configure>", lambda e: self._draw())
@@ -44,6 +52,8 @@ class PillButton(tk.Canvas):
         w, h = self._pw, self._ph
         r = h / 2
         fill = self._fill if self._enabled else Theme.BORDER
+        if self._enabled and self._pressed:
+            fill = _darken(fill)
         fg = self._fg if self._enabled else Theme.DIM
         stroke = Theme.BORDER if self._outline else ""
         self._round_rect(2, 2, w - 2, h - 2, r, fill=fill, outline=stroke, width=1)
@@ -58,8 +68,20 @@ class PillButton(tk.Canvas):
         self.create_polygon(points, smooth=True, **kw)
 
     def _on_click(self, _event):
-        if self._enabled and self._command:
+        if not self._enabled:
+            return
+        # Visual press feedback so a click always registers something on
+        # screen even before whatever the command does produces its own
+        # feedback (which may be delayed, e.g. waiting on a serial reply).
+        self._pressed = True
+        self._draw()
+        self.after(120, self._unpress)
+        if self._command:
             self._command()
+
+    def _unpress(self):
+        self._pressed = False
+        self._draw()
 
 
 class Card(tk.Frame):
