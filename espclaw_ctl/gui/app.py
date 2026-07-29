@@ -308,8 +308,10 @@ class App:
 
         text_frame = tk.Frame(pad, bg=Theme.CARD, highlightbackground=Theme.BORDER, highlightthickness=1)
         text_frame.pack(fill="both", expand=True, pady=(0, 10))
-        self.console_text = tk.Text(text_frame, wrap="word", font=Theme.FONT_MONO, bg=Theme.CARD,
-                                     fg=Theme.TEXT, borderwidth=0, state="disabled")
+        self.console_text = tk.Text(text_frame, wrap="word", font=Theme.FONT_MONO, bg=Theme.CONSOLE_BG,
+                                     fg=Theme.CONSOLE_TEXT, insertbackground=Theme.CONSOLE_TEXT,
+                                     selectbackground=Theme.CONSOLE_TEXT, selectforeground=Theme.CONSOLE_BG,
+                                     borderwidth=0, state="disabled")
         scrollbar = ttk.Scrollbar(text_frame, command=self.console_text.yview)
         self.console_text.configure(yscrollcommand=scrollbar.set)
         self.console_text.pack(side="left", fill="both", expand=True, padx=8, pady=8)

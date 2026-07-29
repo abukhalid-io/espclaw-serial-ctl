@@ -12,3 +12,6 @@ class Theme:
     FONT_BOLD = ("Segoe UI", 10, "bold")
     FONT_TITLE = ("Segoe UI", 16, "bold")
     FONT_MONO = ("Consolas", 10)
+
+    CONSOLE_BG = "#000000"
+    CONSOLE_TEXT = "#E2725B"
