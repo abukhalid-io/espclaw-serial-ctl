@@ -55,7 +55,6 @@ class App:
         self.wifi_scanning = False
         self.ap_results = []
         self.selected_ap = None
-        self.web_ip_filled = False
 
         self.wifi_set_buffer = ""
         self.wifi_set_pending = None
@@ -452,7 +451,6 @@ class App:
         self.wifi_value_label.configure(text="—", fg=Theme.TEXT)
         self._clear_console()
         self.wifi_status_buffer = ""
-        self.web_ip_filled = False
         self.show_dashboard_view()
         self.root.after(3000, lambda: self.quick("wifi --status"))
 
@@ -585,12 +583,23 @@ class App:
         if connected == "1":
             self.wifi_value_label.configure(text=kv.get("saved_ssid", "?"), fg=Theme.GREEN)
             ip = kv.get("sta_ip")
-            if ip:
+            # sta_connected can briefly report "1" with sta_ip still 0.0.0.0
+            # (link associated, DHCP lease not granted yet). "0.0.0.0" is a
+            # non-empty string so `if ip:` alone doesn't catch it — treat it
+            # the same as "no real IP yet" instead of locking the Web View
+            # field to a permanently-unreachable address.
+            has_real_ip = bool(ip) and ip != "0.0.0.0"
+            if has_real_ip:
                 self.dash_subtitle.configure(text=f"Connected · IP {ip}")
-                if not self.web_ip_filled:
+                # Keep this synced to whatever IP is actually current — the
+                # device can reconnect to a different network (or get a new
+                # DHCP lease) and the old one-time-only fill left it stuck
+                # on a stale, now-unreachable address.
+                if self.web_ip_entry.get() != ip:
                     self.web_ip_entry.delete(0, "end")
                     self.web_ip_entry.insert(0, ip)
-                    self.web_ip_filled = True
+            else:
+                self.dash_subtitle.configure(text="Connected · waiting for IP...")
         elif connected == "0":
             self.wifi_value_label.configure(text="Disconnected", fg=Theme.RED)
 
